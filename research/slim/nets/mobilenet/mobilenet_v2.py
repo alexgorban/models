@@ -28,11 +28,13 @@ import copy
 import functools
 
 import tensorflow as tf
+from tensorflow.contrib import layers as contrib_layers
+from tensorflow.contrib import slim as contrib_slim
 
 from nets.mobilenet import conv_blocks as ops
 from nets.mobilenet import mobilenet as lib
 
-slim = tf.contrib.slim
+slim = contrib_slim
 op = lib.op
 
 expand_input = ops.expand_input_by_factor
@@ -81,6 +83,25 @@ V2_DEF = dict(
 )
 # pyformat: enable
 
+# Mobilenet v2 Definition with group normalization.
+V2_DEF_GROUP_NORM = copy.deepcopy(V2_DEF)
+V2_DEF_GROUP_NORM['defaults'] = {
+    (contrib_slim.conv2d, contrib_slim.fully_connected,
+     contrib_slim.separable_conv2d): {
+        'normalizer_fn': contrib_layers.group_norm,  # pylint: disable=C0330
+        'activation_fn': tf.nn.relu6,  # pylint: disable=C0330
+    },  # pylint: disable=C0330
+    (ops.expanded_conv,): {
+        'expansion_size': ops.expand_input_by_factor(6),
+        'split_expansion': 1,
+        'normalizer_fn': contrib_layers.group_norm,
+        'residual': True
+    },
+    (contrib_slim.conv2d, contrib_slim.separable_conv2d): {
+        'padding': 'SAME'
+    }
+}
+
 
 @slim.add_arg_scope
 def mobilenet(input_tensor,
@@ -91,6 +112,7 @@ def mobilenet(input_tensor,
               finegrain_classification_mode=False,
               min_depth=None,
               divisible_by=None,
+              activation_fn=None,
               **kwargs):
   """Creates mobilenet V2 network.
 
@@ -104,8 +126,7 @@ def mobilenet(input_tensor,
     input_tensor: The input tensor
     num_classes: number of classes
     depth_multiplier: The multiplier applied to scale number of
-    channels in each layer. Note: this is called depth multiplier in the
-    paper but the name is kept for consistency with slim's model builder.
+    channels in each layer.
     scope: Scope of the operator
     conv_defs: Allows to override default conv def.
     finegrain_classification_mode: When set to True, the model
@@ -117,6 +138,8 @@ def mobilenet(input_tensor,
     many channels after application of depth multiplier.
     divisible_by: If provided will ensure that all layers # channels
     will be divisible by this number.
+    activation_fn: Activation function to use, defaults to tf.nn.relu6 if not
+      specified.
     **kwargs: passed directly to mobilenet.mobilenet:
       prediction_fn- what prediction function to use.
       reuse-: whether to reuse variables (if reuse set to true, scope
@@ -136,6 +159,12 @@ def mobilenet(input_tensor,
     conv_defs = copy.deepcopy(conv_defs)
     if depth_multiplier < 1:
       conv_defs['spec'][-1].params['num_outputs'] /= depth_multiplier
+  if activation_fn:
+    conv_defs = copy.deepcopy(conv_defs)
+    defaults = conv_defs['defaults']
+    conv_defaults = (
+        defaults[(slim.conv2d, slim.fully_connected, slim.separable_conv2d)])
+    conv_defaults['activation_fn'] = activation_fn
 
   depth_args = {}
   # NB: do not set depth_args unless they are provided to avoid overriding
@@ -153,6 +182,8 @@ def mobilenet(input_tensor,
         scope=scope,
         multiplier=depth_multiplier,
         **kwargs)
+
+mobilenet.default_image_size = 224
 
 
 def wrapped_partial(func, *args, **kwargs):
@@ -177,6 +208,19 @@ def mobilenet_base(input_tensor, depth_multiplier=1.0, **kwargs):
   return mobilenet(input_tensor,
                    depth_multiplier=depth_multiplier,
                    base_only=True, **kwargs)
+
+
+@slim.add_arg_scope
+def mobilenet_base_group_norm(input_tensor, depth_multiplier=1.0, **kwargs):
+  """Creates base of the mobilenet (no pooling and no logits) ."""
+  kwargs['conv_defs'] = V2_DEF_GROUP_NORM
+  kwargs['conv_defs']['defaults'].update({
+      (contrib_layers.group_norm,): {
+          'groups': kwargs.pop('groups', 8)
+      }
+  })
+  return mobilenet(
+      input_tensor, depth_multiplier=depth_multiplier, base_only=True, **kwargs)
 
 
 def training_scope(**kwargs):

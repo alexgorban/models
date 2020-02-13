@@ -32,14 +32,18 @@ from __future__ import division
 from __future__ import print_function
 
 import tensorflow as tf
+from tensorflow.contrib import framework as contrib_framework
+from tensorflow.contrib import slim as contrib_slim
 
-
-arg_scope = tf.contrib.framework.arg_scope
-slim = tf.contrib.slim
+arg_scope = contrib_framework.arg_scope
+slim = contrib_slim
 
 DATA_FORMAT_NCHW = 'NCHW'
 DATA_FORMAT_NHWC = 'NHWC'
 INVALID = 'null'
+# The cap for tf.clip_by_value, it's hinted from the activation distribution
+# that the majority of activation values are in the range [-6, 6].
+CLIP_BY_VALUE_CAP = 6
 
 
 def calc_reduction_layers(num_cells, num_reduction_layers):
@@ -52,14 +56,14 @@ def calc_reduction_layers(num_cells, num_reduction_layers):
   return reduction_layers
 
 
-@tf.contrib.framework.add_arg_scope
+@contrib_framework.add_arg_scope
 def get_channel_index(data_format=INVALID):
   assert data_format != INVALID
   axis = 3 if data_format == 'NHWC' else 1
   return axis
 
 
-@tf.contrib.framework.add_arg_scope
+@contrib_framework.add_arg_scope
 def get_channel_dim(shape, data_format=INVALID):
   assert data_format != INVALID
   assert len(shape) == 4
@@ -71,19 +75,19 @@ def get_channel_dim(shape, data_format=INVALID):
     raise ValueError('Not a valid data_format', data_format)
 
 
-@tf.contrib.framework.add_arg_scope
+@contrib_framework.add_arg_scope
 def global_avg_pool(x, data_format=INVALID):
   """Average pool away the height and width spatial dimensions of x."""
   assert data_format != INVALID
   assert data_format in ['NHWC', 'NCHW']
   assert x.shape.ndims == 4
   if data_format == 'NHWC':
-    return tf.reduce_mean(x, [1, 2])
+    return tf.reduce_mean(input_tensor=x, axis=[1, 2])
   else:
-    return tf.reduce_mean(x, [2, 3])
+    return tf.reduce_mean(input_tensor=x, axis=[2, 3])
 
 
-@tf.contrib.framework.add_arg_scope
+@contrib_framework.add_arg_scope
 def factorized_reduction(net, output_filters, stride, data_format=INVALID):
   """Reduces the shape of net without information loss due to striding."""
   assert data_format != INVALID
@@ -97,8 +101,12 @@ def factorized_reduction(net, output_filters, stride, data_format=INVALID):
     stride_spec = [1, 1, stride, stride]
 
   # Skip path 1
-  path1 = tf.nn.avg_pool(
-      net, [1, 1, 1, 1], stride_spec, 'VALID', data_format=data_format)
+  path1 = tf.compat.v2.nn.avg_pool2d(
+      input=net,
+      ksize=[1, 1, 1, 1],
+      strides=stride_spec,
+      padding='VALID',
+      data_format=data_format)
   path1 = slim.conv2d(path1, int(output_filters / 2), 1, scope='path1_conv')
 
   # Skip path 2
@@ -106,15 +114,19 @@ def factorized_reduction(net, output_filters, stride, data_format=INVALID):
   # include those 0's that were added.
   if data_format == 'NHWC':
     pad_arr = [[0, 0], [0, 1], [0, 1], [0, 0]]
-    path2 = tf.pad(net, pad_arr)[:, 1:, 1:, :]
+    path2 = tf.pad(tensor=net, paddings=pad_arr)[:, 1:, 1:, :]
     concat_axis = 3
   else:
     pad_arr = [[0, 0], [0, 0], [0, 1], [0, 1]]
-    path2 = tf.pad(net, pad_arr)[:, :, 1:, 1:]
+    path2 = tf.pad(tensor=net, paddings=pad_arr)[:, :, 1:, 1:]
     concat_axis = 1
 
-  path2 = tf.nn.avg_pool(
-      path2, [1, 1, 1, 1], stride_spec, 'VALID', data_format=data_format)
+  path2 = tf.compat.v2.nn.avg_pool2d(
+      input=path2,
+      ksize=[1, 1, 1, 1],
+      strides=stride_spec,
+      padding='VALID',
+      data_format=data_format)
 
   # If odd number of filters, add an additional one to the second path.
   final_filter_size = int(output_filters / 2) + int(output_filters % 2)
@@ -126,14 +138,14 @@ def factorized_reduction(net, output_filters, stride, data_format=INVALID):
   return final_path
 
 
-@tf.contrib.framework.add_arg_scope
+@contrib_framework.add_arg_scope
 def drop_path(net, keep_prob, is_training=True):
   """Drops out a whole example hiddenstate with the specified probability."""
   if is_training:
-    batch_size = tf.shape(net)[0]
+    batch_size = tf.shape(input=net)[0]
     noise_shape = [batch_size, 1, 1, 1]
     random_tensor = keep_prob
-    random_tensor += tf.random_uniform(noise_shape, dtype=tf.float32)
+    random_tensor += tf.random.uniform(noise_shape, dtype=tf.float32)
     binary_tensor = tf.cast(tf.floor(random_tensor), net.dtype)
     keep_prob_inv = tf.cast(1.0 / keep_prob, net.dtype)
     net = net * keep_prob_inv * binary_tensor
@@ -172,11 +184,13 @@ def _operation_to_info(operation):
   return num_layers, filter_shape
 
 
-def _stacked_separable_conv(net, stride, operation, filter_size):
+def _stacked_separable_conv(net, stride, operation, filter_size,
+                            use_bounded_activation):
   """Takes in an operations and parses it to the correct sep operation."""
   num_layers, kernel_size = _operation_to_info(operation)
+  activation_fn = tf.nn.relu6 if use_bounded_activation else tf.nn.relu
   for layer_num in range(num_layers - 1):
-    net = tf.nn.relu(net)
+    net = activation_fn(net)
     net = slim.separable_conv2d(
         net,
         filter_size,
@@ -187,7 +201,7 @@ def _stacked_separable_conv(net, stride, operation, filter_size):
     net = slim.batch_norm(
         net, scope='bn_sep_{0}x{0}_{1}'.format(kernel_size, layer_num + 1))
     stride = 1
-  net = tf.nn.relu(net)
+  net = activation_fn(net)
   net = slim.separable_conv2d(
       net,
       filter_size,
@@ -223,10 +237,12 @@ def _operation_to_pooling_info(operation):
   return pooling_type, pooling_shape
 
 
-def _pooling(net, stride, operation):
+def _pooling(net, stride, operation, use_bounded_activation):
   """Parses operation and performs the correct pooling operation on net."""
   padding = 'SAME'
   pooling_type, pooling_shape = _operation_to_pooling_info(operation)
+  if use_bounded_activation:
+    net = tf.nn.relu6(net)
   if pooling_type == 'avg':
     net = slim.avg_pool2d(net, pooling_shape, stride=stride, padding=padding)
   elif pooling_type == 'max':
@@ -248,11 +264,13 @@ class NasNetABaseCell(object):
       should be concatenated together.
     hiddenstate_indices: Determines what hiddenstates should be combined
       together with the specified operations to create the NASNet cell.
+    use_bounded_activation: Whether or not to use bounded activations. Bounded
+      activations better lend themselves to quantized inference.
   """
 
   def __init__(self, num_conv_filters, operations, used_hiddenstates,
                hiddenstate_indices, drop_path_keep_prob, total_num_cells,
-               total_training_steps):
+               total_training_steps, use_bounded_activation=False):
     self._num_conv_filters = num_conv_filters
     self._operations = operations
     self._used_hiddenstates = used_hiddenstates
@@ -260,6 +278,7 @@ class NasNetABaseCell(object):
     self._drop_path_keep_prob = drop_path_keep_prob
     self._total_num_cells = total_num_cells
     self._total_training_steps = total_training_steps
+    self._use_bounded_activation = use_bounded_activation
 
   def _reduce_prev_layer(self, prev_layer, curr_layer):
     """Matches dimension of prev_layer to the curr_layer."""
@@ -270,12 +289,13 @@ class NasNetABaseCell(object):
     prev_num_filters = get_channel_dim(prev_layer.shape)
     curr_filter_shape = int(curr_layer.shape[2])
     prev_filter_shape = int(prev_layer.shape[2])
+    activation_fn = tf.nn.relu6 if self._use_bounded_activation else tf.nn.relu
     if curr_filter_shape != prev_filter_shape:
-      prev_layer = tf.nn.relu(prev_layer)
+      prev_layer = activation_fn(prev_layer)
       prev_layer = factorized_reduction(
           prev_layer, curr_num_filters, stride=2)
     elif curr_num_filters != prev_num_filters:
-      prev_layer = tf.nn.relu(prev_layer)
+      prev_layer = activation_fn(prev_layer)
       prev_layer = slim.conv2d(
           prev_layer, curr_num_filters, 1, scope='prev_1x1')
       prev_layer = slim.batch_norm(prev_layer, scope='prev_bn')
@@ -288,29 +308,26 @@ class NasNetABaseCell(object):
     # Check to be sure prev layer stuff is setup correctly
     prev_layer = self._reduce_prev_layer(prev_layer, net)
 
-    net = tf.nn.relu(net)
+    net = tf.nn.relu6(net) if self._use_bounded_activation else tf.nn.relu(net)
     net = slim.conv2d(net, num_filters, 1, scope='1x1')
     net = slim.batch_norm(net, scope='beginning_bn')
-    split_axis = get_channel_index()
-    net = tf.split(axis=split_axis, num_or_size_splits=1, value=net)
-    for split in net:
-      assert int(split.shape[split_axis] == int(self._num_conv_filters *
-                                                self._filter_scaling))
+    # num_or_size_splits=1
+    net = [net]
     net.append(prev_layer)
     return net
 
   def __call__(self, net, scope=None, filter_scaling=1, stride=1,
-               prev_layer=None, cell_num=-1):
+               prev_layer=None, cell_num=-1, current_step=None):
     """Runs the conv cell."""
     self._cell_num = cell_num
     self._filter_scaling = filter_scaling
     self._filter_size = int(self._num_conv_filters * filter_scaling)
 
     i = 0
-    with tf.variable_scope(scope):
+    with tf.compat.v1.variable_scope(scope):
       net = self._cell_base(net, prev_layer)
       for iteration in range(5):
-        with tf.variable_scope('comb_iter_{}'.format(iteration)):
+        with tf.compat.v1.variable_scope('comb_iter_{}'.format(iteration)):
           left_hiddenstate_idx, right_hiddenstate_idx = (
               self._hiddenstate_indices[i],
               self._hiddenstate_indices[i + 1])
@@ -323,27 +340,31 @@ class NasNetABaseCell(object):
           operation_right = self._operations[i+1]
           i += 2
           # Apply conv operations
-          with tf.variable_scope('left'):
+          with tf.compat.v1.variable_scope('left'):
             h1 = self._apply_conv_operation(h1, operation_left,
-                                            stride, original_input_left)
-          with tf.variable_scope('right'):
+                                            stride, original_input_left,
+                                            current_step)
+          with tf.compat.v1.variable_scope('right'):
             h2 = self._apply_conv_operation(h2, operation_right,
-                                            stride, original_input_right)
+                                            stride, original_input_right,
+                                            current_step)
 
           # Combine hidden states using 'add'.
-          with tf.variable_scope('combine'):
+          with tf.compat.v1.variable_scope('combine'):
             h = h1 + h2
+            if self._use_bounded_activation:
+              h = tf.nn.relu6(h)
 
           # Add hiddenstate to the list of hiddenstates we can choose from
           net.append(h)
 
-      with tf.variable_scope('cell_output'):
+      with tf.compat.v1.variable_scope('cell_output'):
         net = self._combine_unused_states(net)
 
       return net
 
   def _apply_conv_operation(self, net, operation,
-                            stride, is_from_original_input):
+                            stride, is_from_original_input, current_step):
     """Applies the predicted conv operation to net."""
     # Dont stride if this is not one of the original hiddenstates
     if stride > 1 and not is_from_original_input:
@@ -351,23 +372,33 @@ class NasNetABaseCell(object):
     input_filters = get_channel_dim(net.shape)
     filter_size = self._filter_size
     if 'separable' in operation:
-      net = _stacked_separable_conv(net, stride, operation, filter_size)
+      net = _stacked_separable_conv(net, stride, operation, filter_size,
+                                    self._use_bounded_activation)
+      if self._use_bounded_activation:
+        net = tf.clip_by_value(net, -CLIP_BY_VALUE_CAP, CLIP_BY_VALUE_CAP)
     elif operation in ['none']:
+      if self._use_bounded_activation:
+        net = tf.nn.relu6(net)
       # Check if a stride is needed, then use a strided 1x1 here
       if stride > 1 or (input_filters != filter_size):
-        net = tf.nn.relu(net)
+        if not self._use_bounded_activation:
+          net = tf.nn.relu(net)
         net = slim.conv2d(net, filter_size, 1, stride=stride, scope='1x1')
         net = slim.batch_norm(net, scope='bn_1')
+        if self._use_bounded_activation:
+          net = tf.clip_by_value(net, -CLIP_BY_VALUE_CAP, CLIP_BY_VALUE_CAP)
     elif 'pool' in operation:
-      net = _pooling(net, stride, operation)
+      net = _pooling(net, stride, operation, self._use_bounded_activation)
       if input_filters != filter_size:
         net = slim.conv2d(net, filter_size, 1, stride=1, scope='1x1')
         net = slim.batch_norm(net, scope='bn_1')
+      if self._use_bounded_activation:
+        net = tf.clip_by_value(net, -CLIP_BY_VALUE_CAP, CLIP_BY_VALUE_CAP)
     else:
       raise ValueError('Unimplemented operation', operation)
 
     if operation != 'none':
-      net = self._apply_drop_path(net)
+      net = self._apply_drop_path(net, current_step=current_step)
     return net
 
   def _combine_unused_states(self, net):
@@ -388,7 +419,7 @@ class NasNetABaseCell(object):
       should_reduce = should_reduce and not used_h
       if should_reduce:
         stride = 2 if final_height != curr_height else 1
-        with tf.variable_scope('reduction_{}'.format(idx)):
+        with tf.compat.v1.variable_scope('reduction_{}'.format(idx)):
           net[idx] = factorized_reduction(
               net[idx], final_num_filters, stride)
 
@@ -400,7 +431,7 @@ class NasNetABaseCell(object):
     net = tf.concat(values=states_to_combine, axis=concat_axis)
     return net
 
-  @tf.contrib.framework.add_arg_scope  # No public API. For internal use only.
+  @contrib_framework.add_arg_scope  # No public API. For internal use only.
   def _apply_drop_path(self, net, current_step=None,
                        use_summaries=False, drop_connect_version='v3'):
     """Apply drop_path regularization.
@@ -429,23 +460,24 @@ class NasNetABaseCell(object):
         layer_ratio = (self._cell_num + 1)/float(num_cells)
         if use_summaries:
           with tf.device('/cpu:0'):
-            tf.summary.scalar('layer_ratio', layer_ratio)
+            tf.compat.v1.summary.scalar('layer_ratio', layer_ratio)
         drop_path_keep_prob = 1 - layer_ratio * (1 - drop_path_keep_prob)
       if drop_connect_version in ['v1', 'v3']:
         # Decrease the keep probability over time
-        if not current_step:
-          current_step = tf.cast(tf.train.get_or_create_global_step(),
-                                 tf.float32)
+        if current_step is None:
+          current_step = tf.compat.v1.train.get_or_create_global_step()
+        current_step = tf.cast(current_step, tf.float32)
         drop_path_burn_in_steps = self._total_training_steps
         current_ratio = current_step / drop_path_burn_in_steps
         current_ratio = tf.minimum(1.0, current_ratio)
         if use_summaries:
           with tf.device('/cpu:0'):
-            tf.summary.scalar('current_ratio', current_ratio)
+            tf.compat.v1.summary.scalar('current_ratio', current_ratio)
         drop_path_keep_prob = (1 - current_ratio * (1 - drop_path_keep_prob))
       if use_summaries:
         with tf.device('/cpu:0'):
-          tf.summary.scalar('drop_path_keep_prob', drop_path_keep_prob)
+          tf.compat.v1.summary.scalar('drop_path_keep_prob',
+                                      drop_path_keep_prob)
       net = drop_path(net, drop_path_keep_prob)
     return net
 
@@ -454,7 +486,7 @@ class NasNetANormalCell(NasNetABaseCell):
   """NASNetA Normal Cell."""
 
   def __init__(self, num_conv_filters, drop_path_keep_prob, total_num_cells,
-               total_training_steps):
+               total_training_steps, use_bounded_activation=False):
     operations = ['separable_5x5_2',
                   'separable_3x3_2',
                   'separable_5x5_2',
@@ -472,14 +504,15 @@ class NasNetANormalCell(NasNetABaseCell):
                                             hiddenstate_indices,
                                             drop_path_keep_prob,
                                             total_num_cells,
-                                            total_training_steps)
+                                            total_training_steps,
+                                            use_bounded_activation)
 
 
 class NasNetAReductionCell(NasNetABaseCell):
   """NASNetA Reduction Cell."""
 
   def __init__(self, num_conv_filters, drop_path_keep_prob, total_num_cells,
-               total_training_steps):
+               total_training_steps, use_bounded_activation=False):
     operations = ['separable_5x5_2',
                   'separable_7x7_2',
                   'max_pool_3x3',
@@ -497,4 +530,5 @@ class NasNetAReductionCell(NasNetABaseCell):
                                                hiddenstate_indices,
                                                drop_path_keep_prob,
                                                total_num_cells,
-                                               total_training_steps)
+                                               total_training_steps,
+                                               use_bounded_activation)

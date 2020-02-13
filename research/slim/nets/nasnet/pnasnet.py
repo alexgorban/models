@@ -23,17 +23,20 @@ from __future__ import print_function
 
 import copy
 import tensorflow as tf
+from tensorflow.contrib import framework as contrib_framework
+from tensorflow.contrib import slim as contrib_slim
+from tensorflow.contrib import training as contrib_training
 
 from nets.nasnet import nasnet
 from nets.nasnet import nasnet_utils
 
-arg_scope = tf.contrib.framework.arg_scope
-slim = tf.contrib.slim
+arg_scope = contrib_framework.arg_scope
+slim = contrib_slim
 
 
 def large_imagenet_config():
   """Large ImageNet configuration based on PNASNet-5."""
-  return tf.contrib.training.HParams(
+  return contrib_training.HParams(
       stem_multiplier=3.0,
       dense_dropout_keep_prob=0.5,
       num_cells=12,
@@ -45,12 +48,13 @@ def large_imagenet_config():
       data_format='NHWC',
       skip_reduction_layer_input=1,
       total_training_steps=250000,
+      use_bounded_activation=False,
   )
 
 
 def mobile_imagenet_config():
   """Mobile ImageNet configuration based on PNASNet-5."""
-  return tf.contrib.training.HParams(
+  return contrib_training.HParams(
       stem_multiplier=1.0,
       dense_dropout_keep_prob=0.5,
       num_cells=9,
@@ -62,6 +66,7 @@ def mobile_imagenet_config():
       data_format='NHWC',
       skip_reduction_layer_input=1,
       total_training_steps=250000,
+      use_bounded_activation=False,
   )
 
 
@@ -114,6 +119,7 @@ def _build_pnasnet_base(images,
   filter_scaling = 1.0
   # true_cell_num accounts for the stem cells
   true_cell_num = 2
+  activation_fn = tf.nn.relu6 if hparams.use_bounded_activation else tf.nn.relu
   for cell_num in range(hparams.num_cells):
     is_reduction = cell_num in reduction_indices
     stride = 2 if is_reduction else 1
@@ -134,15 +140,15 @@ def _build_pnasnet_base(images,
 
     if (hparams.use_aux_head and cell_num in aux_head_cell_idxes and
         num_classes and is_training):
-      aux_net = tf.nn.relu(net)
+      aux_net = activation_fn(net)
       # pylint: disable=protected-access
       nasnet._build_aux_head(aux_net, end_points, num_classes, hparams,
                              scope='aux_{}'.format(cell_num))
       # pylint: enable=protected-access
 
   # Final softmax layer
-  with tf.variable_scope('final_layer'):
-    net = tf.nn.relu(net)
+  with tf.compat.v1.variable_scope('final_layer'):
+    net = activation_fn(net)
     net = nasnet_utils.global_avg_pool(net)
     if add_and_check_endpoint('global_pool', net) or not num_classes:
       return net, end_points
@@ -170,11 +176,12 @@ def build_pnasnet_large(images,
   # pylint: enable=protected-access
 
   if tf.test.is_gpu_available() and hparams.data_format == 'NHWC':
-    tf.logging.info('A GPU is available on the machine, consider using NCHW '
-                    'data format for increased speed on GPU.')
+    tf.compat.v1.logging.info(
+        'A GPU is available on the machine, consider using NCHW '
+        'data format for increased speed on GPU.')
 
   if hparams.data_format == 'NCHW':
-    images = tf.transpose(images, [0, 3, 1, 2])
+    images = tf.transpose(a=images, perm=[0, 3, 1, 2])
 
   # Calculate the total number of cells in the network.
   # There is no distinction between reduction and normal cells in PNAS so the
@@ -184,7 +191,8 @@ def build_pnasnet_large(images,
 
   normal_cell = PNasNetNormalCell(hparams.num_conv_filters,
                                   hparams.drop_path_keep_prob, total_num_cells,
-                                  hparams.total_training_steps)
+                                  hparams.total_training_steps,
+                                  hparams.use_bounded_activation)
   with arg_scope(
       [slim.dropout, nasnet_utils.drop_path, slim.batch_norm],
       is_training=is_training):
@@ -217,11 +225,12 @@ def build_pnasnet_mobile(images,
   # pylint: enable=protected-access
 
   if tf.test.is_gpu_available() and hparams.data_format == 'NHWC':
-    tf.logging.info('A GPU is available on the machine, consider using NCHW '
-                    'data format for increased speed on GPU.')
+    tf.compat.v1.logging.info(
+        'A GPU is available on the machine, consider using NCHW '
+        'data format for increased speed on GPU.')
 
   if hparams.data_format == 'NCHW':
-    images = tf.transpose(images, [0, 3, 1, 2])
+    images = tf.transpose(a=images, perm=[0, 3, 1, 2])
 
   # Calculate the total number of cells in the network.
   # There is no distinction between reduction and normal cells in PNAS so the
@@ -231,7 +240,8 @@ def build_pnasnet_mobile(images,
 
   normal_cell = PNasNetNormalCell(hparams.num_conv_filters,
                                   hparams.drop_path_keep_prob, total_num_cells,
-                                  hparams.total_training_steps)
+                                  hparams.total_training_steps,
+                                  hparams.use_bounded_activation)
   with arg_scope(
       [slim.dropout, nasnet_utils.drop_path, slim.batch_norm],
       is_training=is_training):
@@ -259,7 +269,7 @@ class PNasNetNormalCell(nasnet_utils.NasNetABaseCell):
   """PNASNet Normal Cell."""
 
   def __init__(self, num_conv_filters, drop_path_keep_prob, total_num_cells,
-               total_training_steps):
+               total_training_steps, use_bounded_activation=False):
     # Configuration for the PNASNet-5 model.
     operations = [
         'separable_5x5_2', 'max_pool_3x3', 'separable_7x7_2', 'max_pool_3x3',
@@ -271,4 +281,5 @@ class PNasNetNormalCell(nasnet_utils.NasNetABaseCell):
 
     super(PNasNetNormalCell, self).__init__(
         num_conv_filters, operations, used_hiddenstates, hiddenstate_indices,
-        drop_path_keep_prob, total_num_cells, total_training_steps)
+        drop_path_keep_prob, total_num_cells, total_training_steps,
+        use_bounded_activation)

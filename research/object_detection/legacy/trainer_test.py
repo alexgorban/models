@@ -18,6 +18,7 @@
 import tensorflow as tf
 
 from google.protobuf import text_format
+from tensorflow.contrib import layers as contrib_layers
 
 from object_detection.core import losses
 from object_detection.core import model
@@ -89,10 +90,10 @@ class FakeDetectionModel(model.DetectionModel):
       prediction_dict: a dictionary holding prediction tensors to be
         passed to the Loss or Postprocess functions.
     """
-    flattened_inputs = tf.contrib.layers.flatten(preprocessed_inputs)
-    class_prediction = tf.contrib.layers.fully_connected(
-        flattened_inputs, self._num_classes)
-    box_prediction = tf.contrib.layers.fully_connected(flattened_inputs, 4)
+    flattened_inputs = contrib_layers.flatten(preprocessed_inputs)
+    class_prediction = contrib_layers.fully_connected(flattened_inputs,
+                                                      self._num_classes)
+    box_prediction = contrib_layers.fully_connected(flattened_inputs, 4)
 
     return {
         'class_predictions_with_background': tf.reshape(
@@ -160,6 +161,17 @@ class FakeDetectionModel(model.DetectionModel):
     }
     return loss_dict
 
+  def regularization_losses(self):
+    """Returns a list of regularization losses for this model.
+
+    Returns a list of regularization losses for this model that the estimator
+    needs to use during training/optimization.
+
+    Returns:
+      A list of regularization loss tensors.
+    """
+    pass
+
   def restore_map(self, fine_tune_checkpoint_type='detection'):
     """Returns a map of variables to load from a foreign checkpoint.
 
@@ -173,6 +185,18 @@ class FakeDetectionModel(model.DetectionModel):
       A dict mapping variable names to variables.
     """
     return {var.op.name: var for var in tf.global_variables()}
+
+  def updates(self):
+    """Returns a list of update operators for this model.
+
+    Returns a list of update operators for this model that must be executed at
+    each training step. The estimator's train op needs to have a control
+    dependency on these updates.
+
+    Returns:
+      A list of update operators.
+    """
+    pass
 
 
 class TrainerTest(tf.test.TestCase):

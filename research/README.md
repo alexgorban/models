@@ -22,14 +22,15 @@ request.
     for visual navigation.
 -   [compression](compression): compressing and decompressing images using a
     pre-trained Residual GRU network.
+-   [cvt_text](cvt_text): semi-supervised sequence learning with cross-view
+    training.
 -   [deep_contextual_bandits](deep_contextual_bandits): code for a variety of contextual bandits algorithms using deep neural networks and Thompson sampling.
 -   [deep_speech](deep_speech): automatic speech recognition.
 -   [deeplab](deeplab): deep labeling for semantic image segmentation.
 -   [delf](delf): deep local features for image matching and retrieval.
--   [differential_privacy](differential_privacy): differential privacy for training
-    data.
 -   [domain_adaptation](domain_adaptation): domain separation networks.
--   [gan](gan): generative adversarial networks.
+-   [fivo](fivo): filtering variational objectives for training generative
+    sequence models.
 -   [im2txt](im2txt): image-to-text neural network for image captioning.
 -   [inception](inception): deep convolutional networks for computer vision.
 -   [keypointnet](keypointnet): discovery of latent 3D keypoints via end-to-end
@@ -62,7 +63,6 @@ request.
     preserving (real NVP) transformations.
 -   [rebar](rebar): low-variance, unbiased gradient estimates for discrete
     latent variable models.
--   [resnet](resnet): deep and wide residual networks.
 -   [seq2species](seq2species): deep learning solution for read-level taxonomic
     classification.
 -   [skip_thoughts](skip_thoughts): recurrent neural network sentence-to-vector
@@ -70,6 +70,7 @@ request.
 -   [slim](slim): image classification models in TF-Slim.
 -   [street](street): identify the name of a street (in France) from an image
     using a Deep RNN.
+-   [struct2depth](struct2depth): unsupervised learning of depth and ego-motion.
 -   [swivel](swivel): the Swivel algorithm for generating word embeddings.
 -   [syntaxnet](syntaxnet): neural models of natural language syntax.
 -   [tcn](tcn): Self-supervised representation learning from multi-view video.
